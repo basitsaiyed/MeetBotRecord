@@ -2,10 +2,7 @@ module bot
 
 go 1.23.4
 
-require (
-	github.com/playwright-community/playwright-go v0.5001.0
-	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
-)
+require github.com/playwright-community/playwright-go v0.5001.0
 
 require (
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
