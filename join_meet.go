@@ -7,173 +7,155 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
-
 	"math/rand"
 
 	"github.com/playwright-community/playwright-go"
 )
 
-// func setDefaultAudioDevice() error {
-// 	// This requires a third-party tool like 'nircmd' or a PowerShell script
-// 	// Example with nircmd (download from nirsoft.net):
-// 	cmd := exec.Command("nircmd", "setdefaultsounddevice", "CABLE Input (VB-Audio Virtual Cable)", "1")
-// 	return cmd.Run()
-// }
-
 func main() {
-
 	// Start recording
 	recordCmd := startRecording()
-	defer recordCmd.Process.Kill() // Stop recording after meeting ends
+	defer func() {
+		fmt.Println("Stopping recording...")
+		recordCmd.Process.Signal(os.Interrupt)
+		recordCmd.Wait()
+	}()
 
+	// Initialize Playwright
 	pw, err := playwright.Run()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to start Playwright: %v", err)
 	}
+	defer pw.Stop()
+
+	// Launch browser
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(false), // Set to playwright.Bool(true) for background execution
+		Headless: playwright.Bool(false), // Set to true for background execution
 		Args: []string{
 			"--disable-blink-features=AutomationControlled",
-			"--use-fake-ui-for-media-stream", // Prevents camera/mic prompts
+			"--use-fake-ui-for-media-stream",
 			"--use-fake-device-for-media-stream",
 		},
 	})
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to launch browser: %v", err)
 	}
+	defer browser.Close()
 
+	// Create new page
 	page, err := browser.NewPage()
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to create page: %v", err)
 	}
 
+	// Meeting configuration
 	meetingURL := "https://meet.google.com/fho-nohr-kdg" // Replace with actual meeting link
-	fmt.Println("Joining:", meetingURL)
+	guestName := "clavirion"                             // Set guest name
+	meetingDuration := 10 * time.Minute                  // Set meeting duration
 
-	page.Goto(meetingURL)
+	fmt.Printf("Joining meeting: %s as %s\n", meetingURL, guestName)
 
-	// Wait for the "Join as guest" form (if available)
-	// time.Sleep(5 * time.Second)
-	// Add random delays between actions
-	time.Sleep(time.Duration(2+rand.Intn(3)) * time.Second)
+	// Navigate to the meeting URL
+	if _, err := page.Goto(meetingURL); err != nil {
+		log.Fatalf("Failed to navigate to meeting URL: %v", err)
+	}
 
-	// Add mouse movements
-	page.Mouse().Move(100, 100)
+	// Add random delay to simulate human behavior
+	randomDelay(2, 5)
 
-	// Simulate scrolling
+	// Add realistic user behavior
+	simulateHumanBehavior(page)
+
+	// Join the meeting
+	if err := joinMeeting(page, guestName); err != nil {
+		log.Printf("Error joining meeting: %v", err)
+	}
+
+	// Set up browser disconnect handler
+	setupDisconnectHandler(browser, recordCmd)
+
+	// Wait for the meeting duration
+	fmt.Printf("Staying in meeting for %v\n", meetingDuration)
+	time.Sleep(meetingDuration)
+
+	fmt.Println("Meeting time completed. Exiting...")
+}
+
+// simulateHumanBehavior adds random mouse movements and scrolling to appear more human-like
+func simulateHumanBehavior(page playwright.Page) {
+	page.Mouse().Move(100+float64(rand.Intn(300)), 100+float64(rand.Intn(200)))
 	page.Mouse().Wheel(0, 100)
+	randomDelay(1, 2)
+}
 
-	// Use more reliable selectors
+// joinMeeting handles the process of joining a Google Meet
+func joinMeeting(page playwright.Page, guestName string) error {
+	// Fill in name if the field is available
 	nameInput := page.Locator("input[aria-label='Your name']")
 	if nameInput != nil {
-		err = nameInput.Fill("clavirion")
-		if err != nil {
-			log.Printf("Could not fill name: %v", err)
-		}
-	}
-
-	// Wait for the join button
-	GotItButton := page.Locator("button:has-text('Got it')")
-	if GotItButton != nil {
-		err = GotItButton.Click()
-		if err != nil {
-			log.Printf("Could not click join button: %v", err)
-		}
-	}
-
-	askJoinButton := page.Locator("button:has-text('Ask to join')")
-	if askJoinButton != nil {
-		ok, _ := askJoinButton.IsVisible()
-		if ok {
-			err = askJoinButton.Click()
-			if err != nil {
-				log.Printf("Could not click Ask to Join button: %v", err)
+		isVisible, err := nameInput.IsVisible()
+		if err == nil && isVisible {
+			if err := nameInput.Fill(guestName); err != nil {
+				log.Printf("Could not fill name: %v", err)
 			} else {
-				fmt.Println("Clicked Ask to Join button")
-			}
-		} else {
-			fmt.Println("Ask to Join button is not visible")
-		}
-	} else {
-		fmt.Println("Ask to Join button not found")
-	}
-
-	// Wait for the join button
-	joinButton := page.Locator("button:has-text('Join now')")
-	if joinButton != nil {
-		err = joinButton.Click()
-		if err != nil {
-			log.Printf("Could not click Join Now button: %v", err)
-		}
-	} else {
-		// If "Join now" button is missing, try "Ask to join"
-
-		if askJoinButton != nil {
-			err = askJoinButton.Click()
-			if err != nil {
-				log.Printf("Could not click Ask to Join button: %v", err)
+				fmt.Println("Entered guest name")
 			}
 		}
 	}
+
+	// Click "Got it" button if visible
+	handleButton(page, "button:has-text('Got it')", "Got it")
 
 	// Ensure microphone and camera are off
-	micButton := page.Locator("[aria-label='Turn off microphone']")
-	if micButton != nil {
-		micButton.Click()
+	handleButton(page, "[aria-label='Turn off microphone']", "Turn off microphone")
+	handleButton(page, "[aria-label='Turn off camera']", "Turn off camera")
+
+	// Try to join the meeting - first try "Join now" button
+	if !handleButton(page, "button:has-text('Join now')", "Join now") {
+		// If "Join now" failed, try "Ask to join" button
+		if !handleButton(page, "button:has-text('Ask to join')", "Ask to join") {
+			return fmt.Errorf("could not find any join button")
+		}
 	}
 
-	cameraButton := page.Locator("[aria-label='Turn off camera']")
-	if cameraButton != nil {
-		cameraButton.Click()
+	fmt.Println("Successfully requested to join the meeting")
+	return nil
+}
+
+// handleButton attempts to click a button identified by selector
+func handleButton(page playwright.Page, selector string, buttonName string) bool {
+	button := page.Locator(selector)
+	if button == nil {
+		return false
 	}
 
-	nameInput.Fill("clavirion") // Set guest name
-	GotItButton.Click()         // Click "Got it" button
-	fmt.Println("Bot requested to join the meeting.")
-	time.Sleep(5 * time.Second)
-	joinButton.Click() // Click join button
-	askJoinButton.Click()
-	fmt.Println("Bot joined the meeting.")
+	isVisible, err := button.IsVisible()
+	if err != nil || !isVisible {
+		return false
+	}
 
+	if err := button.Click(); err != nil {
+		log.Printf("Could not click %s button: %v", buttonName, err)
+		return false
+	}
+
+	fmt.Printf("Clicked %s button\n", buttonName)
+	randomDelay(1, 3)
+	return true
+}
+
+// setupDisconnectHandler creates a handler for browser disconnects
+func setupDisconnectHandler(browser playwright.Browser, recordCmd *exec.Cmd) {
 	go func() {
 		browser.On("disconnected", func() {
 			fmt.Println("Browser closed unexpectedly. Stopping recording...")
 			recordCmd.Process.Signal(os.Interrupt)
 			recordCmd.Wait()
 		})
-		fmt.Println("Browser closed unexpectedly. Stopping recording...")
-		recordCmd.Process.Signal(os.Interrupt)
-		recordCmd.Wait()
 	}()
-
-	// Wait for a predefined meeting duration
-	time.Sleep(10 * time.Minute) // Adjust duration as needed
-
-	fmt.Println("Meeting ended. Stopping recording...")
-	recordCmd.Process.Signal(os.Interrupt)
-	recordCmd.Wait()
-	browser.Close()
-	pw.Stop()
-
 }
 
-// func startRecording() *exec.Cmd {
-// 	cmd := exec.Command("ffmpeg", "-f", "gdigrab", "-framerate", "30", "-i", "desktop",
-// 		"-f", "dshow", "-i", "audio=CABLE Output (VB-Audio Virtual Cable)",
-// 		"-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "meeting_record.mp4")
-
-// 	cmd.Stdout = os.Stdout
-// 	cmd.Stderr = os.Stderr
-
-// 	err := cmd.Start()
-// 	if err != nil {
-// 		log.Fatal("Failed to start recording:", err)
-// 	}
-
-// 	fmt.Println("Recording started...")
-// 	return cmd
-// }
-
+// startRecording starts the FFmpeg process to record the meeting audio
 func startRecording() *exec.Cmd {
 	// Ensure the recordings folder exists
 	recordingFolder := "recordings"
@@ -189,10 +171,10 @@ func startRecording() *exec.Cmd {
 	cmd := exec.Command("ffmpeg",
 		"-f", "dshow",
 		"-i", "audio=CABLE Output (VB-Audio Virtual Cable)",
-		"-ac", "2", // Stereo
-		"-ar", "44100", // Sample rate 44.1kHz
+		"-ac", "2",       // Stereo
+		"-ar", "44100",   // Sample rate 44.1kHz
 		"-c:a", "libmp3lame", // MP3 codec
-		"-b:a", "192k", // Bitrate 192kbps
+		"-b:a", "192k",   // Bitrate 192kbps
 		filepath,
 	)
 
@@ -207,4 +189,10 @@ func startRecording() *exec.Cmd {
 
 	fmt.Println("Recording started:", filepath)
 	return cmd
+}
+
+// randomDelay adds a random delay between actions to simulate human behavior
+func randomDelay(min, max int) {
+	delay := min + rand.Intn(max-min+1)
+	time.Sleep(time.Duration(delay) * time.Second)
 }
